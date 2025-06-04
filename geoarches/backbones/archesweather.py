@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa N812
 import torch.utils.checkpoint as gradient_checkpoint
-from tensordict.tensordict import TensorDict
+from tensordict import TensorDict
 from timm.layers.mlp import SwiGLU
 
 import geoarches.stats as geoarches_stats
@@ -13,10 +13,10 @@ from geoarches.backbones.archesweather_layers import ICNR_init
 
 from .archesweather_layers import (
     CondBasicLayer,
-    DownSample,
+    Downsample,
     LinVert,
     Mlp,
-    UpSample,
+    Upsample,
 )
 
 
@@ -230,7 +230,7 @@ class ArchesWeatherCondBackbone(nn.Module):
             **layer_args,
             **kwargs,
         )
-        self.downsample = DownSample(
+        self.downsample = Downsample(
             in_dim=emb_dim,
             input_resolution=(self.zdim, *self.layer1_shape),
             output_resolution=(self.zdim, *self.layer2_shape),
@@ -253,7 +253,7 @@ class ArchesWeatherCondBackbone(nn.Module):
             **layer_args,
             **kwargs,
         )
-        self.upsample = UpSample(
+        self.upsample = Upsample(
             emb_dim * 2, emb_dim, (self.zdim, *self.layer2_shape), (self.zdim, *self.layer1_shape)
         )
         out_dim = emb_dim if not self.use_skip else 2 * emb_dim

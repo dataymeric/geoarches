@@ -80,16 +80,17 @@ def ICNR_init(tensor, initializer, upscale_factor=2, *args, **kwargs):  # noqa N
     tensor.data.copy_(new_tensor)
 
 
-class UpSample(nn.Module):
-    """
-    Up-sampling operation.
-    Implementation from: https://github.com/198808xc/Pangu-Weather/blob/main/pseudocode.py
+class Upsample(nn.Module):
+    """Up-sampling operation.
 
     Args:
         in_dim (int): Number of input channels.
         out_dim (int): Number of output channels.
-        input_resolution (tuple[int]): [pressure levels, latitude, longitude]
-        output_resolution (tuple[int]): [pressure levels, latitude, longitude]
+        input_resolution (tuple[int, int, int]): input resolution (Pl, Lat, Lon)
+        output_resolution (tuple[int, int, int]): output resolution (Pl, Lat, Lon)
+
+    Note:
+        See https://github.com/198808xc/Pangu-Weather/blob/main/pseudocode.py#L326
     """
 
     def __init__(self, in_dim, out_dim, input_resolution, output_resolution):
@@ -100,45 +101,44 @@ class UpSample(nn.Module):
         self.input_resolution = input_resolution
         self.output_resolution = output_resolution
 
+        assert self.input_resolution[0] == self.output_resolution[0], (
+            "the dimension of pressure level should not change"
+        )
+
     def forward(self, x: torch.Tensor):
         """
         Args:
             x (torch.Tensor): (B, N, C)
+
+        Returns:
+            torch.Tensor: upsampled tensor to the desired output resolution of
+                shape (B, Pl * Lat * Lon, C)
         """
         B, N, C = x.shape
         in_pl, in_lat, in_lon = self.input_resolution
-        out_pl, out_lat, out_lon = self.output_resolution
 
-        x = self.linear1(x)
+        x = self.linear1(x)  # (B, N, C*4)
         x = x.reshape(B, in_pl, in_lat, in_lon, 2, 2, C // 2).permute(0, 1, 2, 4, 3, 5, 6)
-        x = x.reshape(B, in_pl, in_lat * 2, in_lon * 2, -1)
+        x = x.reshape(B, in_pl, in_lat * 2, in_lon * 2, -1)  # B, Pl, Lat*2, Lon*2, C)
 
-        assert in_pl == out_pl, "the dimension of pressure level shouldn't change"
-        pad_h = in_lat * 2 - out_lat
-        pad_w = in_lon * 2 - out_lon
-
-        pad_top = pad_h // 2
-        pad_bottom = pad_h - pad_top
-
-        pad_left = pad_w // 2
-        pad_right = pad_w - pad_left
-
-        x = x[:, :out_pl, pad_top : 2 * in_lat - pad_bottom, pad_left : 2 * in_lon - pad_right, :]
+        x = crop3d(x, self.output_resolution)  # B, Pl, Lat*2, Lon*2, C
         x = x.reshape(x.shape[0], x.shape[1] * x.shape[2] * x.shape[3], x.shape[4])
+
         x = self.norm(x)
         x = self.linear2(x)
         return x
 
 
-class DownSample(nn.Module):
-    """
-    Down-sampling operation
-    Implementation from: https://github.com/198808xc/Pangu-Weather/blob/main/pseudocode.py
+class Downsample(nn.Module):
+    """Down-sampling operation.
 
     Args:
         in_dim (int): Number of input channels.
-        input_resolution (tuple[int]): [pressure levels, latitude, longitude]
-        output_resolution (tuple[int]): [pressure levels, latitude, longitude]
+        input_resolution (tuple[int, int, int]): input resolution (Pl, Lat, Lon)
+        output_resolution (tuple[int, int, int]): output resolution (Pl, Lat, Lon)
+
+    Note:
+        See https://github.com/198808xc/Pangu-Weather/blob/main/pseudocode.py#L296
     """
 
     def __init__(self, in_dim, input_resolution, output_resolution):
@@ -148,22 +148,11 @@ class DownSample(nn.Module):
         self.input_resolution = input_resolution
         self.output_resolution = output_resolution
 
-        in_pl, in_lat, in_lon = self.input_resolution
-        out_pl, out_lat, out_lon = self.output_resolution
-
-        assert in_pl == out_pl, "the dimension of pressure level shouldn't change"
-        h_pad = out_lat * 2 - in_lat
-        w_pad = out_lon * 2 - in_lon
-
-        pad_top = h_pad // 2
-        pad_bottom = h_pad - pad_top
-
-        pad_left = w_pad // 2
-        pad_right = w_pad - pad_left
-
-        pad_front = pad_back = 0
-
-        self.pad = nn.ZeroPad3d((pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back))
+        assert self.input_resolution[0] == self.output_resolution[0], (
+            "the dimension of pressure level should not change"
+        )
+        padding = get_pad3d(self.input_resolution, self.output_resolution)
+        self.pad = nn.ZeroPad3d(padding)
 
     def forward(self, x):
         B, N, C = x.shape
@@ -422,7 +411,7 @@ class EarthSpecificBlock(nn.Module):
     def forward(self, x: torch.Tensor, c: torch.Tensor = None, dt=1):
         Pl, Lat, Lon = self.input_resolution
         B, L, C = x.shape
-        assert L == Pl * Lat * Lon, "input feature has wrong size"
+        assert L == Pl * Lat * Lon, f"Wrong feature size: {L} != {Pl}x{Lat}x{Lon}={Pl * Lat * Lon}"
 
         shortcut = x
         x = self.norm1(x)
@@ -472,7 +461,9 @@ class EarthSpecificBlock(nn.Module):
             x = shifted_x
 
         # crop, end pad
-        x = crop3d(x.permute(0, 4, 1, 2, 3), self.input_resolution).permute(0, 2, 3, 4, 1)
+        # permute : B, C, Pl, Lat, Lon
+        # crop permute back to B, Pl, Lat, Lon, C
+        x = crop3d(x, self.input_resolution)  # why permute ??
 
         x = x.reshape(B, Pl * Lat * Lon, C)
 
